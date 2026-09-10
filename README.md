@@ -1,206 +1,195 @@
-# Methods
+# MC311 Call Center Staffing
 
-Technical detail for [MC311 Call Center Staffing](README.md).
+**How many agents should a call center staff each day, when being short costs
+more than being overstaffed?**
 
-## The decision framework
+Montgomery County, Maryland runs a 311 center that takes about 1,700 phone
+contacts on a typical weekday. I used 14 years of their call data to answer a
+staffing question, then checked whether weather forecasts could help on the
+worst days.
 
-This is a newsvendor problem. Demand is uncertain, capacity is committed before
-demand is observed, and the costs of over- and under-committing differ. The
-optimal service level is the critical ratio:
+**The short version:** staffing to the 70th percentile of forecast demand
+instead of the average saves about $26,000 a year and cuts missed contacts by
+38%. Adding a snow-triggered surge cuts shortfall on storm days roughly in half
+at no extra cost.
 
-    q* = C_under / (C_under + C_over)
-
-Expressed per contact:
-
-    C_over  = (hourly wage x loaded multiplier x shift hours) / contacts per agent-day
-            = ($21.53 x 1.35 x 8) / 55
-            = $4.23 per contact of capacity
-
-    C_under = cost per contact x unhandled multiplier
-            = $4.15 x 2.5
-            = $10.38 per unhandled contact
-
-    q*      = 10.38 / (10.38 + 4.23) = 0.710
-
-Evaluation uses pinball loss at the target quantile rather than RMSE or MAPE.
-Point-accuracy metrics score the wrong objective when the loss function is
-asymmetric.
-
-## Forecasting approach
-
-**Point forecast.** Trailing 8-observation median for the same weekday. Selected
-by rolling-origin comparison against three alternatives:
-
-| Forecast | MAE | RMSE | MAPE |
-|---|---|---|---|
-| Seasonal naive (same weekday, last week) | 197.4 | 334.5 | 11.02% |
-| Trailing weekday mean | 156.5 | 239.4 | 8.83% |
-| **Trailing weekday median** | **147.4** | **228.9** | **8.31%** |
-| Weekday level x month index | 151.3 | 226.3 | 8.70% |
-
-The median beating the mean is informative: storm spikes pull a mean-based
-forecast around.
-
-**Quantile forecasts.** Trailing 250-day distribution of the ratio
-`actual / point forecast`, applied multiplicatively. Ratios rather than
-differences, because error scales with volume. A 200-contact miss on a
-2,400-contact Monday is not the same event as on a 1,500-contact Friday.
-
-Coverage check on 3,165 days:
-
-| Nominal | Actual | Gap |
-|---|---|---|
-| 0.50 | 0.493 | -0.007 |
-| 0.70 | 0.692 | -0.008 |
-| 0.80 | 0.795 | -0.005 |
-| 0.90 | 0.889 | -0.011 |
-| 0.95 | 0.946 | -0.004 |
-
-Every quantile lands within 1.1 points of nominal.
-
-## Leakage prevention
-
-Every value used to forecast day *t* comes from days strictly before *t*.
-
-- Quantiles come from a trailing residual window, shifted one day.
-- Storm multipliers use only storms that already happened. State updates occur
-  after each row is scored.
-- Closure flags use a trailing 60-day median, shifted.
-- No random train/test split anywhere. Evaluation is rolling-origin throughout.
-
-## Cleaning decisions
-
-**Weekends dropped.** Weekend volume averages 102 contacts against 1,799 on
-weekdays. That is after-hours logging, not staffed service. There is no staffing
-decision to make on a day the center is closed.
-
-**Closures excluded from evaluation, not imputed.** A closed office is not a
-demand event. Forecasting "1 contact on Thanksgiving" is trivially easy and
-would flatter every error metric.
-
-Closures are identified from the data rather than from a federal holiday
-calendar: any weekday below 40% of its trailing 60-day median. This catches 40
-days (1.1%), including unscheduled snow closures and partial days that a
-hardcoded calendar would miss.
-
-**Storm days kept.** They are real demand and they are the point of the
-analysis. Removing them would improve every accuracy metric and worsen every
-decision.
-
-## Weather features
-
-The naive feature is same-day snowfall. It is wrong, and the diagnostic shows
-why.
-
-Correlation between snow accumulation and the volume ratio:
-
-| Window | All days | Days with snow |
-|---|---|---|
-| Same day | **-0.033** | -0.133 |
-| 2-day | 0.115 | 0.224 |
-| 3-day | 0.206 | 0.356 |
-| 5-day | 0.322 | 0.462 |
-| 7-day | 0.349 | 0.486 |
-
-Same-day snow is negatively correlated. The county closes during the storm.
-Correlation rises monotonically with the window because demand is deferred into
-the reopening and stays elevated for most of a week.
-
-Lag structure after 2+ inches:
-
-| Days after snow | Mean volume ratio | Share above 1.2x |
-|---|---|---|
-| 0 | 0.931 | 12% |
-| 1 | 1.228 | 40% |
-| 2 | 1.196 | 38% |
-| 3 | 1.245 | 21% |
-| 4 | 1.210 | 22% |
-| 5 | 1.218 | 30% |
-
-Baseline across all days is 1.012 with 5.8% above 1.2x.
-
-Dose response on 3-day accumulation:
-
-| Accumulation | Days | Mean ratio | Median ratio |
-|---|---|---|---|
-| None | 2,768 | 1.009 | 0.999 |
-| Trace to 0.5" | 227 | 1.001 | 0.991 |
-| 0.5-1" | 53 | 1.036 | 0.997 |
-| 1-2" | 39 | 1.011 | 1.020 |
-| 2-4" | 42 | 1.041 | 1.021 |
-| 4-8" | 31 | 1.171 | 1.031 |
-| **8"+** | **5** | **1.669** | **1.619** |
-
-The response is a threshold, not a gradient. Below 4 inches, nothing. The
-initial 4-inch trigger was set by intuition; the data moved it to 8.
-
-**Cold is a separate signal.** 119 days below 20°F show a mean ratio of 1.135
-without snow necessarily present. Frozen pipes, heating complaints, water main
-breaks.
-
-## Storm-conditional staffing
-
-Storm days are drawn from a different distribution:
-
-| Quantile | All days | Storm days |
-|---|---|---|
-| 50th | 0.999 | 1.055 |
-| 70th | 1.048 | 1.254 |
-| 80th | 1.081 | 1.445 |
-| 90th | 1.142 | 1.932 |
-| 95th | 1.215 | 2.309 |
-
-By accumulation band:
-
-| Band | n | Mean ratio | Median ratio |
-|---|---|---|---|
-| 4-8 inches | 60 | 1.153 | 1.021 |
-| 8+ inches | 8 | 1.842 | 1.963 |
-
-**Estimator.** For each triggered day, take the q-th quantile of the ratio from
-all *prior* storm days, split by accumulation band once at least 8 prior storms
-exist in that band, otherwise pooled. Days without enough history fall back to
-the fixed-quantile policy. 60 of 68 storm days had sufficient history.
-
-Sample size is the binding constraint. With 68 events in twelve years, anything
-more elaborate than a trailing quantile would fit noise. No regression, no
-tuning parameters.
-
-## A complication tested and rejected
-
-Monday averages 2,075 contacts and Friday 1,594, a 30% spread. That suggested
-per-weekday quantile targets might beat a single fixed quantile.
-
-Coverage at the 70th percentile by weekday:
-
-| Weekday | Coverage |
+| | |
 |---|---|
-| Monday | 0.704 |
-| Tuesday | 0.699 |
-| Wednesday | 0.664 |
-| Thursday | 0.695 |
-| Friday | 0.697 |
+| **Data** | 6.5M phone contacts, 2012-2026, plus daily weather |
+| **Method** | Quantile forecasting, newsvendor cost model, rolling-origin validation |
+| **Result** | $26K/year, 38% fewer missed contacts |
+| **Caveat** | Cost figures are industry benchmarks, not this county's actuals. Every result is tested across a range of them. |
 
-Spread of 0.040. A single quantile serves every weekday, so the policy stays
-simple.
+Technical detail lives in [METHODS.md](METHODS.md).
 
-## Data notes
+---
 
-**Channel selection.** MC311 records 18 contact channels. Phone is 82.2% of
-volume, web is 13.9%, and everything else is under 3%. Only phone contacts
-consume agent handle time. Walk-in exists but is 0.18% of volume.
+## Why the average forecast is the wrong target
 
-**Aggregation.** The source has 7.9M individual service requests. Socrata
-aggregates server-side, so daily counts by channel, request type and department
-come back in three queries rather than 160 pages of raw records.
+Most forecasting work optimizes for accuracy. That is the wrong goal here,
+because the two ways of being wrong don't cost the same.
 
-**Weekday-only operation.** 3,790 days carry phone volume across a 5,179-day
-calendar span, which is 73%, consistent with weekdays only.
+An idle agent costs a day's wages. An unhandled contact costs a callback, a
+frustrated resident, and a second call tomorrow. When those costs differ, you
+shouldn't staff to expected demand. You should staff above it, and exactly how
+far above is a calculation, not a guess.
 
-**Request mix drift.** The fulfillment share of phone contacts rose from 18.4%
-in 2012 to 36.1% in 2026. Handle time is modeled as constant at 55 contacts per
-agent-day, which this drift suggests is optimistic for recent years.
+![Cost by staffing level](reports/cost_curve.png)
 
-**Forecast error drift.** MAE rose from 114 in 2019 to 169 in 2026 while mean
-volume fell. Relative error is worsening. Consistent with a harder residual call
-mix, not diagnosed further.
+The two dashed lines are the argument. Staff up and idle time gets expensive.
+Staff down and missed contacts get expensive. Total cost bottoms out where they
+cross, at the 70th percentile. The horizontal line is what the accuracy-optimal
+forecast costs. It sits $26,000 higher.
+
+The theory says the optimum should be the 71st percentile. The data says the
+70th. That agreement is a good sign the model is doing what it claims.
+
+## What it costs to be wrong
+
+I used published benchmarks rather than invented numbers:
+
+| Input | Value | Source |
+|---|---|---|
+| Agent wage | $21.53/hour | BLS median for customer service reps, May 2025 |
+| Loaded cost | 1.35x wage | Standard benefits and overhead |
+| Cost per contact | $4.15 | Midpoint of published $2.70-$5.60 industry range |
+| Unhandled contact | 2.5x a handled one | Base case, tested from 1x to 6x |
+
+That last row is the assumption anyone would argue with, so here is what
+happens when you change it:
+
+| If an unhandled contact costs... | Best policy | Annual saving |
+|---|---|---|
+| The same as a handled one | 50th percentile | **-$817** |
+| 2x | 70th percentile | $10,328 |
+| **2.5x (base case)** | **70th percentile** | **$26,468** |
+| 4x | 80th percentile | $89,979 |
+| 6x | 85th percentile | $193,972 |
+
+The recommendation holds across the range. Note the first row: when the costs
+are equal, this whole approach loses money. That is the honest boundary on it.
+
+## "We'd be short 31% of days" sounds worse than it is
+
+Under the recommended policy, about a third of days end up with some unmet
+demand. That number alarms people, and it shouldn't.
+
+On a typical short day, the gap is 99 contacts. That is under two agents. The
+90th percentile is 6.5 agents.
+
+More importantly, the problem isn't spread out:
+
+![Concentration of unmet demand](reports/shortfall_concentration.png)
+
+Half of all missed contacts come from 5% of days. Normal staffing handles
+normal variation fine. The risk sits in a handful of bad days, which means the
+fix is a surge plan for those days, not permanent headcount you pay for all
+year.
+
+## The bad days are snowstorms
+
+Every one of the ten worst days in 14 years was a winter storm. January runs
+short on 47% of days. October runs short on 7%.
+
+Snow shows up 11 times more often before an extreme day than you'd expect by
+chance. That makes it a usable trigger, because snow gets forecast a day or two
+ahead.
+
+Two things surprised me:
+
+**Snow on the day itself predicts *fewer* calls.** During the storm the county
+closes and nobody calls. The demand shows up when they reopen and stays high for
+most of a week. When a 14-inch storm hit on a Saturday in January 2016, the call
+surge ran Monday through Thursday. So the right signal is snow over the past
+five to seven days, not today's snow.
+
+**The threshold is 8 inches, not 4.** I picked 4 inches to start with because it
+sounded like a lot of snow. At 4-8 inches, call volume is basically normal. Above
+8 inches, it nearly doubles. The data corrected the guess.
+
+## Why a normal surge isn't big enough
+
+The obvious move is to staff storm days to a high percentile. I tried the 95th.
+It still left an average gap of 299 contacts and only covered two thirds of
+storm days.
+
+![Storm day distribution](reports/storm_distribution.png)
+
+The reason is in the chart. A percentile calculated from all days describes
+normal variation, and normal variation tops out around 1.14x the forecast. Storm
+days routinely run 1.9x and one hit 2.6x. You're using the wrong distribution.
+
+The fix is to size the surge from previous storms instead:
+
+| Approach | Storm days covered | Average gap | Annual cost |
+|---|---|---|---|
+| Normal staffing (70th pct) | 48% | 7.4 agents | $257,608 |
+| Permanently staff higher (90th pct) | 60% | 6.2 agents | $323,716 |
+| Surge to 95th pct on snow | 66% | 5.4 agents | $255,219 |
+| **Size the surge from past storms** | **75%** | **3.5 agents** | **$254,548** |
+
+Coverage goes from 48% to 75% and the gap halves. Total cost barely moves, which
+is worth saying plainly: 68 storm days out of 3,165 can't shift an annual budget
+much. **The value is service on the days people remember, not savings.** For
+comparison, buying similar coverage by permanently staffing higher costs $66,000
+more a year.
+
+**One honest limit:** I used actual weather, not forecast weather. So this shows
+what a perfect forecast would be worth, which is a ceiling, not a delivered
+number. Big snowstorms are forecast well 24-48 hours out, so the real number
+should be close, but I haven't proven that.
+
+## Recommendation
+
+1. **Staff to the 70th percentile** of forecast daily demand. About $26,000 a
+   year, 38% fewer missed contacts.
+2. **Add a snow surge** at 8+ inches over five days, sized from past storms.
+   Fires about 5 days a year and halves the shortfall on those days.
+3. **Revisit above a 4x cost ratio.** At that point permanent capacity beats
+   surging and the recommendation changes.
+
+## Things I found along the way
+
+- **Call volume is falling**, 2,040/day in 2012 to about 1,500 in 2025, as the
+  web absorbs routine requests. The share of phone calls that create a service
+  request rose from 18% to 36%. The easy calls left. The hard ones stayed.
+- **No COVID dip.** 2020 volume was up 1.8% on 2019.
+- **A field that looked useful and wasn't.** The dataset flags whether each
+  request met its service-level target, which looked like a perfect way to price
+  the cost of being understaffed. It isn't. That flag measures whether
+  *departments* finish the work, not whether the call center answers the phone.
+  Tree Maintenance has a 245-day window and misses it 31% of the time. That's
+  the roads department not removing stumps. No amount of call center staffing
+  changes it.
+
+## Limitations
+
+- Actual weather stands in for forecast weather, so surge results are a ceiling.
+- Handle time is assumed constant at 55 contacts per agent-day. The rising
+  complexity of calls suggests it isn't.
+- Cost inputs are industry benchmarks, not this county's actuals.
+- This sets a daily headcount. Real scheduling also needs an intraday arrival
+  curve.
+
+## Reproducing
+
+    conda create -n mc311 python=3.12 -y
+    conda activate mc311
+    pip install pandas pyarrow requests matplotlib scikit-learn
+
+Everything is fetched by script. Nothing is downloaded by hand.
+
+    python src/fetch_daily.py        # MC311 call data
+    python src/fetch_weather.py      # daily weather
+    python src/build_series.py       # daily series + diagnostics
+    python src/baselines.py          # cleaning + baseline forecasts
+    python src/staffing_model.py     # quantile forecasts + cost model
+    python src/shortfall_profile.py  # where the shortfall concentrates
+    python src/weather_response.py   # how volume responds to weather
+    python src/weather_policy.py     # surge policies
+    python src/storm_model.py        # storm-conditional staffing
+    python src/make_charts.py        # figures
+
+Data from the [Montgomery County open data
+portal](https://data.montgomerycountymd.gov/) and
+[Open-Meteo](https://open-meteo.com/).
